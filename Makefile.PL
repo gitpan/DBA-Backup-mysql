@@ -9,11 +9,11 @@ $bin_dir ||= '/usr/bin';
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
 # the contents of the Makefile that is written.
 WriteMakefile(
-    NAME              => 'DBA::Backup::MySQL',
-    VERSION_FROM      => 'lib/DBA/Backup.pm', # finds $VERSION
+    NAME              => 'DBA::Backup::mysql',
+    VERSION_FROM      => 'lib/DBA/Backup/mysql.pm', # finds $VERSION
     PREREQ_PM         => {}, # e.g., Module::Name => 1.1
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
-      (ABSTRACT_FROM  => 'lib/DBA/Backup.pm', # retrieve abstract from module
+      (ABSTRACT_FROM  => 'lib/DBA/Backup/mysql.pm', # retrieve abstract from module
        AUTHOR         => 'Sean Quinlan <sean@quinlan.org>') : ()),
     INSTALLSCRIPT     => $bin_dir,
 );

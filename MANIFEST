@@ -1,10 +1,7 @@
-bin/mysql-backup
-create_backup_account.sql
-etc/mysql-backup.conf
-lib/DBA/Backup.pm
-lib/DBA/Backup/MySQL.pm
+etc/dba-backup-mysql.yml
+lib/DBA/Backup/mysql.pm
 Makefile.PL
 MANIFEST
 README
-t/DBA-Backup-MySQL.t
+t/DBA-Backup-mysql.t
 META.yml                                 Module meta-data (added by MakeMaker)
