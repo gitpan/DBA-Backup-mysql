@@ -1,0 +1,10 @@
+bin/mysql-backup
+create_backup_account.sql
+etc/mysql-backup.conf
+lib/DBA/Backup.pm
+lib/DBA/Backup/MySQL.pm
+Makefile.PL
+MANIFEST
+README
+t/DBA-Backup-MySQL.t
+META.yml                                 Module meta-data (added by MakeMaker)
