@@ -1,41 +1,26 @@
-# Custom configuration file for MySQL database backup program
+# Custom configuration section for MySQL database backup program
+#
+# Paste this file into the dba-backup.yml to be used by your DBA::Backup
+# process and edit as needed to specify your mysql servers
 #
 # IMPORTANT!
 # This backup process requires that binary update logging is turned on.
 # We recommend using both log-slow-queries and log-bin
-#
-# SECTIONS DESCRIPTION: 
-#
-#   backup-params - controls how often and what is the max size of different
-#                     log files before they are rotated	
-#
-#   mysqladmin - section for mysqladmin options
-#
-#   mysqldump - section for mysqldump options
-#
-#   mail-setup - controls whether email notifications will be send
-#                  and to which people
-#
-#   backups - list of databases to be backed up give as
-#                        name or as a pattern
 
-# IMPORTANT: Ensure that this config file is owned by an appropriate privileged
-#            user and group and its mode is 400 or 440.
 
-# IMPORTANT: Comments on the same line as a config varible are not supported
-#            Eg:  varname = value # commment  - invalid
-#
-#              varname = value 
-#              # commment - valid 
+# Name a new server to be backeup of type mysql. A good naming convention
+# is probably just to use the hostname the server runs on. Copy and edit
+# this entire section once per mysql server you want to back up. The name
+# of the server may contain characters in the class [A-Za-z0-9_] only.
+server_servername1:
+  server_type: mysql
 
---- #YAML:1.0
-
-## db_connect ##
+## connect ##
 # Specifies the port, username, socket and the name of the temporary text file 
 # for socket connections which the program will use to connect to the database 
 # server with the databases which will be backed up
 
-db_connect:
+  connect:
     PORT: 3306
     SOCKET: '/var/lib/mysql/mysql.sock'
     USER: backup
@@ -68,40 +53,22 @@ db_connect:
 #
 #
 # All rotate_* variables accept only 'yes' or 'no' as valid values 
-# 
+#
 # rotate_gen_query_logs - whether to rotate query log files
 #
 # rotate_slow_query_logs - whether to rotate slow query log files
 #
 # rotate_error_logs - whether to rotate error log files
 
-backup_params:
-#    DUMP_DIR: '/path/to/dump/dir'
-#    DUMP_COPIES: 2
-#    CYCLE_BIN_LOGS_DAILY: yes
+  backup_params:
+    log_dir: '/path/to/mysql/logs'
+    ROTATE_SLOW_QUERY_LOGS: # fix comments
+      MAX_SIZE: 128
+      MAX_FILES: 10
+    ROTATE_GEN_LOGS:
+      MAX_SIZE: 1024
+      MAX_FILES: 5
 
-    LOG_DIR: '/path/to/mysql/logs'
-
-#    MAX_GEN_LOG_SIZE: 1024
-#    MAX_GEN_LOG_FILES: 5
-#    MAX_SLOW_LOG_SIZE: 128
-#    MAX_SLOW_LOG_FILES: 10
-#    MAX_ERROR_LOG_SIZE: 128
-#    MAX_ERROR_LOG_FILES: 10
-
-# which of all rotations to perform
-#    ROTATE_GEN_QUERY_LOGS: yes
-#    ROTATE_SLOW_QUERY_LOGS: yes
-#    ROTATE_ERROR_LOGS: yes
-
-
-## bin_dir ##
-#
-# list the path to executables needed for backups
-
-bin_dir:
-    mysqladmin: '/usr/bin/mysqladmin'
-    mysqldump: '/usr/bin/mysqldump'
 
 ## mysqladmin ##
 # list of options given directly to mysqladmin
@@ -110,11 +77,12 @@ bin_dir:
 #
 # force - continue even if the is an SQL error 
 
-mysqladmin:
+  mysqladmin:
     options:
-        - verbose
-        - force
-#        - etc
+      - verbose
+      - force
+#      - etc
+    path: '/usr/bin/mysqladmin'
 
 
 ## mysqldump ##
@@ -130,14 +98,15 @@ mysqladmin:
 # extended-insert = yes
 # lock-tables     = yes
 
-mysqldump:
+  mysqldump:
     options:
         - opt
         - force
         - set-variable=net_buffer_length=1M
+    path: '/usr/bin/mysqldump'
 
 
-## backup-databases ##
+## databases ##
 #
 # Logs will be backed up every time the backup program is run, unless
 # that activity is specifically turned off. The logs will always be
@@ -146,46 +115,30 @@ mysqldump:
 # We recommend running it daily.
 #
 # List all the databases you want to back up in the following format:
-#    databases:
-#        - mysql
-#        - database1
-#        - database2
-#        - etc
-#
-# List all the days you want your databases backed up as well in a coma
-# seperated list:
-#    days: Mon,Wed,Sat
+#  databases:
+#    - mysql
+#    - database1
+#    - database2
+
+  databases:
+    - mysql
+
+## days ##
+# List all the days you want your databases backed up:
+#  days:
+#    - Mon
+#    - Wed
+#    - Sat
 # For most sites, once a week + daily logs is sufficient
 
-backup:
-    databases:
-        - mysql
-    days: Sat
+  days:
+    - Sat
 
 
 ## mail-setup ##
 # Overide global mail notifications for MySQL server backups.
+# Copy any mail setup parameters from main conf file and set locally here.
 #
-# mail_notification - enable/disable the email notification. Valid
-#                     values are 'yes'/'no'
-#
-# mail_to - comma separated list of email addresses to whom status
-#           notification emails will be sent
-#
-# mail_cc - comma separated list of email adresses of other people who
-#           will be copied on the notification emails
-#
-# mail_from - the email address from which the emails will appear to
-#             come from
-#
-# mail_server - name of the mail server which will be used to send the
-#               notification emails 
-
 #mail_setup:
-#    mail_notification: yes
-#    mail_to:
-#        - 'dba@your.domain.com'
-#    mail_cc:
-#        - 'developer-list@your.domain.com'
-#    mail_from: 'mysql-backup@mysql_server.domain.com'
-#    mail_server: smtp.domain.com
+#  mail_notification: yes
+# etc.

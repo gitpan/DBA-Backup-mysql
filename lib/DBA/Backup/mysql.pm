@@ -1,12 +1,12 @@
 package DBA::Backup::mysql;
 
-use 5.008003;
+use 5.006001;
 use strict;
 use warnings;
-use Compress::Zlib;
+use Compress::Zlib; # replace shelling to gzip?
 use DBA::Backup;
 
-our $VERSION = '0.1';
+our $VERSION = '0.2_1';
 
 =head1
 
@@ -17,112 +17,172 @@ version uploaded soon. Email me or the list for more information.
 The mailing list for the DBA modules is perl-dba@fini.net. See
 http://lists.fini.net/mailman/listinfo/perl-dba to subscribe.
 
-=for dev
+=begin dev
 
 Required methods (can be void if appropriate):
-flush_logs # so all logs are current
-dump_database # as server optimized SQL file
-stop_server # void for mysql?
-start_server
-lock_database
-
+* <server>_flush_logs # so all logs are current
+<server>_rotate_logs # rotate specified log types
+<server>_dump_databases # as server optimized SQL file (locking option)
+<server>_stop_server
+<server>_start_server
+<server>_lock_database
 
 
 =end dev
 
 =cut
 
-sub new {
-	my $class   = shift;
-	my $parent = shift;
+=head1 mysql_flush_logs
+
+Uses mysqladmin refresh to flush all logs and tables.
+
+=cut
+sub mysql_flush_logs {
+	my $self = shift;
+	my $HR_conf = shift;
 	
-	die "DBA::Backup object not provided" unless ref $parent eq 'DBA::Backup';
+	# prepare the flush command
+	my $cmd_path = $HR_conf->{mysqladmin}{path};
+	my $username = $HR_conf->{connect}{USER};
+	my $password = $HR_conf->{connect}{PASSWORD};
+	my $db_host = $HR_conf->{connect}{RDBMS_HOST};
+	my $socket = $HR_conf->{connect}{SOCKET};
+	my $cmd = "$cmd_path -u$username -p$password --host=$db_host "
+		. "--socket=$socket "; 
+	$cmd .= join(' ', map { "--$_" }
+		@{$HR_conf->{mysqladmin}{options}});
+	$cmd .= " refresh";
 	
-	$parent->{backup_params}{CONF_FILE} =~ m{(\S+)/dba-backup.yml};
-	my $conf_file = "$1/dba-backup-mysql.yml";
+	$self->_debug("flushing logs with $cmd");
+	# execute the flush command
+	if (-x $cmd_path) {
+		my $rc = system($cmd);
+		$cmd =~ s/$password/xxxxxx/;
+		$self->_error("$rc recieved on $cmd") if $rc;
+		print $self->{LOG} "Completed: $cmd";
+	} # if we're allowed to execute
+	else {
+		$self->_error("mysqladmin is not executable.");
+	} # else bitch
 	
+	return 0;
+} # mysql_flush_logs
+
+=head1 mysql_rotate_logs
+
+Rotates the binary update, error and any extra mysql logs specified in the
+conf file. Rotation of binary and error logs is not optional on runs when the
+databases get backed up. Error and binary logs are kept as incrementals.
+Other logs are just appended, and are cleared and restarted once over a certain
+size (as defined in conf).
+
+=cut
+sub mysql_rotate_logs {
+	my $self = shift;
+	my $HR_conf = shift;
 	
-	# exits with usage statement if the config file is not valid
-	_is_config_file_valid($conf_file) or usage($conf_file);
+	# check the list of currently running mysql queries
+	print $self->{LOG} "\n\n*Current processlist*\n";
+	$self->_debug("_get_process_list",2);
+	print $self->{LOG} $self->_get_process_list($HR_conf);
 	
-	# Read the YAML formatted configuration file
-	my $HR_conf = LoadFile($conf_file)
-		or return ("Problem reading conf file $params{CONF_FILE}");
+	my $base_log_dir = $HR_conf->{backup_params}{LOG_DIR};
+	my $hostname = $HR_conf->{connect}{RDBMS_HOST} eq 'localhost'
+		? $self->{HOSTNAME} : $HR_conf->{connect}{RDBMS_HOST};
 	
-	# OK, now we need to go through the Backup conf and use as defaults
-	foreach my $key (keys %{$parent}) {
-		warn "$HR_conf->{$key} ||= $parent->{$key}";
-		$HR_conf->{$key} ||= $parent->{$key};
-		warn "\t$key = $HR_conf->{$key}";
-	} # for each key in parent
+	print $self->{LOG} "\n\n*Rotating logs*\n";
+	$self->_debug("_rotate_general_query_log?");
+	$self->_rotate_log("General query",
+			"$base_log_dir/$hostname .log",
+			$HR_conf->{backup_params}{MAX_GEN_LOG_SIZE},
+			$HR_conf->{backup_params}{MAX_GEN_LOG_FILES})
+		if $HR_conf->{backup_params}{ROTATE_GEN_QUERY_LOGS} =~ /yes/i;
 	
-	# now lets modify for certain passed parameters
-	$HR_conf->{LOG_FILE} = $params{LOG_FILE} if $params{LOG_FILE};
+	$self->_debug("_rotate_slow_query_log?");
+	$self->_rotate_slow_query_log()
+		if $HR_conf->{backup_params}{ROTATE_SLOW_QUERY_LOGS} =~ /yes/i;
+	
+	$self->_debug("_cycle_bin_logs?");
 	my $cur_day = substr(localtime,0,3);
-	$HR_conf->{backup}{days} = $cur_day if $params{BACKUP};
-	if ($params{ADD_DATABASES}) {
-		my $AR_dbs = $HR_conf->{backup}{databases};
-		foreach my $db (split(/ ?, ?/,$params{ADD_DATABASES})) {
-			push(@{$AR_dbs},$db) unless grep (/$db/, @{$AR_dbs});
-		} # for each db to add
-	} # if backing up additional databases 
+	if (($self->{backup_params}{CYCLE_BIN_LOGS_DAILY} =~ /^yes$/i ) 
+			or (grep(/$cur_day/i, @{$HR_conf->{days}}))) {
+		$self->_cycle_bin_logs();
+	} # if bin logs backed up daily or today is a full dump day
 	
 	
-	return bless $HR_conf, $class;
-} # end new()
+	$self->_debug("_rotate_error_log?");
+	$self->_rotate_error_log()
+		if $HR_conf->{backup_params}{ROTATE_ERROR_LOGS} =~ /yes/i;
+	
+	return 0;
+} # mysql_rotate_logs
 
 
-=head1 _get_process_list()
+###
+### Internal functions
+###
 
-	Returns a list of all mysql processes running currently on the server.
 
-	Gets the processlist from dbms and print it to the LOG the fields are
-	as follows:
-	Id  User Host db Command Time State Info
-
-	The assumption is that these fields will not change. It's hard to make
-	a dynamic script because LISTFIELDS works only on tables, and retrieval
-	to a hash does not preserve the order of the fields.
-
-=cut 
-
+## _get_process_list() ##
+#
+# Returns a list of all mysql processes running currently on the server.
+#
+# Gets the processlist from dbms and print it to the LOG the fields are
+# as follows:
+# Id  User Host db Command Time State Info
+#
+# The assumption is that these fields will not change. It's hard to make
+# a dynamic script because LISTFIELDS works only on tables, and retrieval
+# to a hash does not preserve the order of the fields.
+#
 sub _get_process_list {
 	my $self = shift;
+	my $HR_conf = shift;
 	
-	my $dbh = $self->DBI;
-	my $proc_ref = $dbh->selectall_arrayref('show processlist');
-	my $mesg = "";
+	# prepare the flush command
+	my $cmd_path = $HR_conf->{mysqladmin}{path};
+	my $username = $HR_conf->{connect}{USER};
+	my $password = $HR_conf->{connect}{PASSWORD};
+	my $db_host = $HR_conf->{connect}{RDBMS_HOST};
+	my $socket = $HR_conf->{connect}{SOCKET};
+	my $cmd = "$cmd_path -u$username -p$password --host=$db_host "
+		. "--socket=$socket "; 
+	$cmd .= join(' ', map { "--$_" }
+		@{$HR_conf->{mysqladmin}{options}});
+	$cmd .= " flush-logs flush-hosts";
 	
-	# extract the summary
-	foreach my $row_ref (@{$proc_ref}) {
-		foreach my $field (@{$row_ref}) {
-			$field = 'NULL' if not defined $field;
-			$mesg .= "$field ";
-		} # for each field
-		$mesg .= "\n"; 
-	} # for each process
+	$self->_debug("Getting process list with $cmd");
+	# execute the flush command
+	my $mesg = '';
+	if (-x $cmd_path) {
+		$mesg = `$cmd`;
+		$cmd =~ s/$password/xxxxxx/;
+		$self->_error("$rc recieved on $cmd") if $?;
+		$self->_debug("Completed: $cmd");
+	} # if we're allowed to execute
+	else {
+		$self->_error("mysqladmin is not executable.");
+	} # else bitch
 	
 	return $mesg;
 } # end _get_process_list()
 
 
 
-sub _rotate_generic_log {
+
+
+###
+### unprocessed original subs
+###
+
+
+sub _rotate_log {
 	my $self = shift;
 	
 	my $logname = shift;
-	my $conf_rotate = shift;
 	my $log_file = shift;
 	my $max_log_size = shift;
 	my $max_log_count = shift;
-
-	print $self->{LOG} "\n";
-
-	# test whether user wants us to rotate
-	unless ( $conf_rotate =~ /^yes$/i ) {
-		print $self->{LOG} "$logname log is configured not to be rotated\n";
-		return;
-	} # don't rotate unless yes
 
 	# test if file exists
 	unless (-f $log_file) {
@@ -154,17 +214,6 @@ sub _rotate_generic_log {
 	print $self->{LOG} "$logname log rotated\n";
 
 } # end _rotate_generic_log()
-
-sub _rotate_general_query_log {
-	my $self = shift;
-	
-	$self->_rotate_generic_log("General query",
-			$self->{backup_params}{ROTATE_GEN_QUERY_LOGS},
-			$self->{backup_params}{LOG_DIR} . '/'
-			. $self->{db_connect}{HOSTNAME} . '.log',
-			$self->{backup_params}{MAX_GEN_LOG_SIZE},
-			$self->{backup_params}{MAX_GEN_LOG_FILES});
-} # end _rotate_general_query_log()
 
 sub _rotate_slow_query_log {
 	my $self = shift;
@@ -212,11 +261,11 @@ sub _rotate_error_log {
 	print $self->{LOG} "... merging into cumulative error log $log_out\n";
 	
 	# merge mysql droppings into our own log file
-	open(INFILE,$log_in) or die "Problem reading $log_in: $!";
-	open(OUTFILE,">>$log_out") or die "Problem appending $log_out: $!";
+	open(INFILE,$log_in) or $self->_error("Problem reading $log_in: $!");
+	open(OUTFILE,">>$log_out") or $self->_error("Problem appending $log_out: $!");
 	while (<INFILE>) { print OUTFILE $_; }
-	close OUTFILE or warn "$!";
-	close INFILE or warn "$!";
+	close OUTFILE or $self->_gripe("$!");
+	close INFILE or $self->_gripe("$!");
 	unlink($log_in);
 	
 	# perform usual log rotation on merged file
@@ -251,48 +300,15 @@ sub _cycle_bin_logs {
 	my $data_dir = $self->{backup_params}{LOG_DIR};	
 	my $dump_dir = $self->{backup_params}{DUMP_DIR} . '/00';
 	
-	# test whether user wants us to cycle
-	my $cur_day = substr(localtime,0,3);
-	my @backup_days = split(/ ?, ?/,$self->{backup}{days});
-	unless (($self->{backup_params}{CYCLE_BIN_LOGS_DAILY} =~ /^yes$/i ) 
-			or (grep(/$cur_day/i, @backup_days))) {
-		print $self->{LOG} "Binary log is not configured to be cycled today";
-#		warn 'Binary log is not configured to be cycled today';
-		return;
-	} # if bin logs only backed up on full dump days and that aint today
-	
 	# get a list of all existing binlog files to back up
 	opendir(DIR, $data_dir) 
-		or $self->error("Cannot open directory where bin log files reside\n");
+		or $self->_error("Cannot open directory where bin log files reside\n");
 	my @binlog_files = grep { /$hostname\-bin\.\d+/ } readdir(DIR);
 	closedir(DIR);
-#	warn "Found @binlog_files in $data_dir";
-	
-	# prepare the flush command
-	my $mysqladmin_path = $self->{bin_dir}{mysqladmin};
-	my $username = $self->{db_connect}{USER};
-	my $password = $self->{db_connect}{PASSWORD};
-	my $db_host = $self->{db_connect}{RDBMS_HOST};
-	my $socket = $self->{db_connect}{SOCKET};
-	my $cmd = "$mysqladmin_path -u$username -p$password --host=$db_host "
-		. "--socket=$socket "; 
-	$cmd .= join(' ', map { "--$_" } @{$self->{mysqladmin}{options}});
-	$cmd .= " flush-logs flush-hosts";
-	
-#	warn "flushing logs with $cmd";
-	# execute the flush command
-	if (-x $mysqladmin_path) {
-		my $rc = system($cmd);
-		$self->error("\nError occured while trying to flush-log mysqld\n") if $rc;
-		print $self->{LOG} "\nmysql flush-logs and flush-hosts commands were issued\n";
-		print $self->{LOG} "... binary update log was cycled\n";
-	} # if we're allowed to execute
-	else {
-		$self->error("mysql flush-logs failed!!! mysqladmin is not executable\n");
-	} # else bitch
+	$self->_debug("Found @binlog_files in $data_dir");
 	
 	# back up the binary update logs
-#	warn 'backing up bin log';
+	$self->_debug('backing up bin log');
 	print $self->{LOG} "\nBacking up binary update logs\n";
 	print $self->{LOG} "Moving binlogs from $data_dir/ to $dump_dir/ ...\n";
 	foreach my $file (@binlog_files) {
@@ -301,7 +317,7 @@ sub _cycle_bin_logs {
 			print $self->{LOG} "... moved $file\n";	
 		} # if move succesful
 		else {
-			$self->error("Can't move the binary log file $file - $!($rc)\n");
+			$self->_error("Can't move the binary log file $file - $!($rc)\n");
 		} # else die
 	} # foreach bin log
 	print $self->{LOG} "Backed up " . int(@binlog_files) . " binary update logs\n";
@@ -340,15 +356,15 @@ sub _backup_databases {
 	if (-d $dump_dir) {
 		print $self->{LOG} "Partial/failed dumps in $dump_dir exist, deleting...\n";
 		eval { File::Path::rmtree($dump_dir) };
-		$self->error("Cannot delete $dump_dir - $@\n") if ($@);
-		$self->error("$dump_dir deleted, but still exists!\n") if (-d $dump_dir);
+		$self->_error("Cannot delete $dump_dir - $@\n") if ($@);
+		$self->_error("$dump_dir deleted, but still exists!\n") if (-d $dump_dir);
 	} # if directory exists
-#	warn '_test_create_dirs';
+	$self->_debug('_test_create_dirs');
 	$self->_test_create_dirs($dump_dir);
 	
 	# dump a .sql.gz file for each database into the dump_dir
 	foreach my $database ( @{$self->{backup}{databases}} ) {
-#		warn "Backing up $database";
+		$self->_debug("Backing up $database");
 		
 		# get the date, parsed into its parts
 		my ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst) 
@@ -382,7 +398,7 @@ sub _backup_databases {
 		$cmd .= "$database | $gzip -9 > $dump_dir/$dump_file";
 		
 		# make sure that the database backup went fine
-#		warn "Dumping with $cmd";
+		$self->_debug("Dumping with $cmd");
 		my $rc = system($cmd);
 		if ($rc) {
 			$cmd =~ s/ -p$password / -pPASSWORD_HIDDEN /;
@@ -451,6 +467,18 @@ Original version; created by h2xs 1.23 with options
 Partially ported from original functional MySQL specific module. Currently
 broken, but I wanted to get the structure set up and uploaded to CPAN.
 
+=item 0.1.1
+
+Some more work on getting port working and some comments. Early release
+for boston.pm mailing list.
+
+=item 0.1.2
+
+Improved configuration handling allowing multiple mysql servers. Sample
+configuration file updated to reflect change. Methods now expect server
+specific configuration to be passed explicitly and no longer look up
+in $self->{mysql_server} directly.
+
 =back
 
 
@@ -464,9 +492,13 @@ http://lists.fini.net/mailman/listinfo/perl-dba to subscribe.
 
 Sean Quinlan, E<lt>gilant@gmail.comE<gt>
 
+Original version by Stefan Dragnev, E<lt>dragnev@molbio.mgh.harvard.eduE<gt>
+with contributions from Norbert Kremer, E<lt>kremer@molbio.mgh.harvard.edu<gt>
+and Danny Park, E<lt>park@molbio.mgh.harvard.edu.<gt>
+
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2004 by Sean Quinlan
+Copyright (C) 2004 by Sean P. Quinlan & Stefan Dragnev
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.3 or,
